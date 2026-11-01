@@ -1,14 +1,14 @@
 """
-Legge dal cloud Meross se il termostato MTS200 sta chiamando la caldaia
+Legge dal cloud Meross se il termostato sta chiamando la caldaia
 e aggiorna la variabile Voice Monkey STATO_RISCALDAMENTO.
 
-Variabili d'ambiente (su GitHub vanno messe come Secrets):
-  MEROSS_EMAIL, MEROSS_PASSWORD   credenziali dell'app Meross
+Secrets su GitHub:
+  MEROSS_EMAIL, MEROSS_PASSWORD   credenziali dell'app Meross (MFA disattivata)
   VM_TOKEN                        token API di Voice Monkey
 Opzionali:
   VM_VARIABILE   nome variabile (default STATO_RISCALDAMENTO)
-  VALORE_ACCESO  valore quando la caldaia scalda (default 1)
-  VALORE_SPENTO  valore quando la caldaia è ferma (default 2)
+  VALORE_ACCESO  valore quando la caldaia scalda (default 2)
+  VALORE_SPENTO  valore quando la caldaia è ferma (default 0)
   MEROSS_REGION  iotx-eu / iotx-us / iotx-ap (default iotx-eu)
 """
 import asyncio
@@ -23,8 +23,8 @@ EMAIL = os.environ["MEROSS_EMAIL"]
 PASSWORD = os.environ["MEROSS_PASSWORD"]
 VM_TOKEN = os.environ["VM_TOKEN"]
 VARIABILE = os.environ.get("VM_VARIABILE", "STATO_RISCALDAMENTO")
-ACCESO = os.environ.get("VALORE_ACCESO", "1")
-SPENTO = os.environ.get("VALORE_SPENTO", "2")
+ACCESO = os.environ.get("VALORE_ACCESO", "2")
+SPENTO = os.environ.get("VALORE_SPENTO", "0")
 REGION = os.environ.get("MEROSS_REGION", "iotx-eu")
 
 VM_URL = "https://api-v3.voicemonkey.io/variables"
@@ -40,23 +40,26 @@ async def leggi_stato_caldaia() -> bool:
     try:
         await manager.async_init()
         await manager.async_device_discovery()
-        termostati = manager.find_devices(device_type="mts200")
+        # Qualsiasi termostato Meross (mts200, mts215b, ...)
+        termostati = [d for d in manager.find_devices()
+                      if d.type.lower().startswith("mts") and hasattr(d, "get_thermostat_state")]
         if not termostati:
             tipi = [d.type for d in manager.find_devices()]
-            raise RuntimeError(f"Nessun MTS200 trovato. Dispositivi sull'account: {tipi}")
+            raise RuntimeError(f"Nessun termostato trovato. Dispositivi sull'account: {tipi}")
 
         dev = termostati[0]
         await dev.async_update()
         stato = dev.get_thermostat_state()
+        if stato is None:
+            raise RuntimeError("Il termostato non ha restituito uno stato")
         grezzo = dict(stato._state)
-        print(f"Termostato: {dev.name}")
+        print(f"Termostato: {dev.name} ({dev.type})")
         print(f"Dati grezzi: {grezzo}")
 
-        acceso = grezzo.get("onoff") == 1
-        # Sull'MTS200 il campo 'state' vale 1 quando il relè chiama la caldaia
         if "state" not in grezzo:
             raise RuntimeError("Il termostato non riporta il campo 'state': controlla i dati grezzi sopra")
-        return acceso and grezzo["state"] == 1
+        # 'state' = 1 -> il relè sta chiamando la caldaia, 2 -> fermo
+        return grezzo.get("onoff", 1) == 1 and grezzo["state"] == 1
     finally:
         manager.close()
         await client.async_logout()
